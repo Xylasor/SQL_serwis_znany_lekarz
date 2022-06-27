@@ -1,0 +1,203 @@
+DROP SEQUENCE badania_seq;
+CREATE SEQUENCE badania_seq START WITH 124;
+CREATE OR REPLACE TRIGGER Ocena_Upd
+AFTER INSERT ON OPINIE
+FOR EACH ROW
+DECLARE
+l_opinii NUMBER(4);
+sr_opinia NUMBER(4,3);
+BEGIN
+SELECT LICZBA_OPINII
+INTO l_opinii
+FROM LEKARZE
+WHERE LEKARZE.ID_LEKARZA = :new.ID_LEKARZA;
+SELECT OPINIA
+INTO sr_opinia
+FROM LEKARZE
+WHERE LEKARZE.ID_LEKARZA = :new.ID_LEKARZA;
+UPDATE LEKARZE
+SET LICZBA_OPINII = coalesce(l_opinii + 1, 1),
+ OPINIA = coalesce((sr_opinia*l_opinii+:new.OCENA)/(l_opinii+1), :new.OCENA)
+WHERE LEKARZE.ID_LEKARZA = :new.ID_LEKARZA;
+END;
+CREATE OR REPLACE TRIGGER znizka_badanie
+BEFORE INSERT ON BADANIA
+FOR EACH ROW
+DECLARE
+ostatnie_badanie DATE;
+BEGIN
+SELECT *
+INTO ostatnie_badanie
+FROM
+ (SELECT DATA_BADANIA
+ FROM BADANIA
+ WHERE BADANIA.ID_LEKARZA = :new.ID_LEKARZA AND BADANIA.ID_PACJENTA = :new.ID_PACJENTA
+ ORDER BY DATA_BADANIA DESC)
+WHERE ROWNUM = 1;
+IF add_months(SYSDATE, -24) <= ostatnie_badanie
+THEN :new.KOSZT := :new.KOSZT * 0.9;
+ dbms_output.put_line('Pacjentowi ' || :new.ID_PACJENTA || ' przyznano znizke w wysokosci ' || :new.KOSZT/9);
+END IF;
+EXCEPTION
+WHEN NO_DATA_FOUND THEN
+ dbms_output.put_line('Pierwsza wizyta pacjenta ' || :new.ID_PACJENTA);
+END;
+CREATE OR REPLACE PACKAGE znany_lekarz IS
+PROCEDURE zapisz_badanie
+(
+ p_id_lekarza IN NUMBER,
+ p_id_pacjenta IN NUMBER,
+ p_data_badania IN DATE
+);
+PROCEDURE najlepsi_lekarze
+(
+ p_id_specjalizacji IN NUMBER,
+ p_num IN NUMBER
+);
+PROCEDURE najtansi_lekarze
+(
+ p_id_specjalizacji IN NUMBER,
+ p_num IN NUMBER
+);
+FUNCTION najlepsza_placowka
+RETURN NUMBER;
+FUNCTION najczestsza_choroba_wiek
+(in_wiek IN NUMBER)
+RETURN CHOROBY.NAZWA%TYPE;
+END znany_lekarz;
+CREATE OR REPLACE PACKAGE BODY znany_lekarz IS
+PROCEDURE zapisz_badanie(
+ p_id_lekarza IN NUMBER,
+ p_id_pacjenta IN NUMBER,
+ p_data_badania IN DATE)
+AS
+ liczba_badan NUMBER;
+ koszt LEKARZE.KOSZT_WIZYTY%TYPE;
+ v_id_pacjenta PACJENCI.ID_PACJENTA%TYPE;
+BEGIN
+SELECT count(*)
+INTO liczba_badan
+FROM BADANIA
+WHERE id_lekarza = p_id_lekarza and data_badania = p_data_badania;
+SELECT KOSZT_WIZYTY
+INTO koszt
+FROM LEKARZE
+WHERE id_lekarza = p_id_lekarza;
+SELECT ID_PACJENTA
+INTO v_id_pacjenta
+FROM PACJENCI
+WHERE id_pacjenta = p_id_pacjenta;
+IF (liczba_badan < 5)
+THEN INSERT INTO BADANIA VALUES (badania_seq.NEXTVAL, p_data_badania, koszt, p_id_lekarza, v_id_pacjenta);
+ELSE dbms_output.put_line('Lekarz ' || p_id_lekarza || ' ma juz umowione 5 wizyt ' || p_data_badania);
+END IF;
+EXCEPTION 
+WHEN NO_DATA_FOUND THEN
+ dbms_output.put_line('Sprawdz ponowanie ID pracownika lub ID lekarza');
+END;
+PROCEDURE najlepsi_lekarze(
+ p_id_specjalizacji IN NUMBER,
+ p_num IN NUMBER)
+AS
+CURSOR c IS
+ SELECT *
+ FROM(
+ SELECT * FROM LEKARZE
+ WHERE ID_SPECJALIZACJI = p_id_specjalizacji
+ ORDER BY OPINIA DESC NULLS LAST)
+ WHERE ROWNUM <= p_num;
+ 
+v_nazwa_specjalizacji SPECJALIZACJA.NAZWA_SPEC%TYPE; 
+BEGIN
+SELECT NAZWA_SPEC
+INTO v_nazwa_specjalizacji
+FROM SPECJALIZACJA
+WHERE ID_SPECJALIZACJI = p_id_specjalizacji;
+ dbms_output.put_line('Najlepiej oceniani lekarze na specjalizacji ' || v_nazwa_specjalizacji);
+ 
+FOR i IN c
+LOOP
+ dbms_output.put_line('ID Lekarza: ' || i.ID_LEKARZA || ', imie i nazwisko: ' || i.IMIE || ' ' || i.NAZWISKO || ', srednia ocena: ' || 
+coalesce(i.opinia,0));
+END LOOP;
+EXCEPTION
+WHEN NO_DATA_FOUND THEN
+ dbms_output.put_line('Sprawdz ponownie wprowadzone dane');
+END;
+PROCEDURE najtansi_lekarze(
+ p_id_specjalizacji IN NUMBER,
+ p_num IN NUMBER)
+AS
+CURSOR c IS
+ SELECT *
+ FROM(
+ SELECT * FROM LEKARZE
+ WHERE ID_SPECJALIZACJI = p_id_specjalizacji
+ ORDER BY KOSZT_WIZYTY ASC NULLS LAST)
+ WHERE ROWNUM <= p_num;
+ 
+v_nazwa_specjalizacji SPECJALIZACJA.NAZWA_SPEC%TYPE; 
+BEGIN
+SELECT NAZWA_SPEC
+INTO v_nazwa_specjalizacji
+FROM SPECJALIZACJA
+WHERE ID_SPECJALIZACJI = p_id_specjalizacji;
+ dbms_output.put_line('Najtansi lekarze na specjalizacji ' || v_nazwa_specjalizacji);
+ 
+FOR i IN c
+LOOP
+ dbms_output.put_line('ID Lekarza: ' || i.ID_LEKARZA || ', imie i nazwisko: ' || i.IMIE || ' ' || i.NAZWISKO || ', koszt wizyty: ' || 
+coalesce(i.koszt_wizyty,0));
+END LOOP;
+EXCEPTION
+WHEN NO_DATA_FOUND THEN
+ dbms_output.put_line('Sprawdz ponownie wprowadzone dane');
+END;
+FUNCTION najlepsza_placowka
+RETURN NUMBER
+AS
+v_najlepsza_placowka PLACOWKA.ID_PLACOWKI%TYPE;
+BEGIN
+SELECT ID_PLACOWKI
+INTO v_najlepsza_placowka
+FROM
+(
+ SELECT ID_PLACOWKI, avg(coalesce(opinia,0)) as srednia
+ FROM(
+ SELECT *
+ FROM ZATRUDNIENIE Z
+ JOIN LEKARZE L
+ ON z.ID_LEKARZA = l.ID_LEKARZA)
+ GROUP BY ID_PLACOWKI
+ ORDER BY srednia desc)
+WHERE ROWNUM = 1;
+RETURN v_najlepsza_placowka;
+END;
+FUNCTION najczestsza_choroba_wiek(in_wiek IN NUMBER)
+RETURN CHOROBY.NAZWA%TYPE
+AS
+v_id_choroby CHOROBY.ID_CHOROBY%TYPE;
+v_nazwa_choroby CHOROBY.NAZWA%TYPE;
+BEGIN
+SELECT ID_CHOROBY
+INTO v_id_choroby
+FROM(
+ SELECT ID_CHOROBY, count(*) as zliczenia
+ FROM(
+ SELECT *
+ FROM BADANIA B
+ JOIN PACJENCI P ON b.ID_PACJENTA = p.ID_PACJENTA JOIN CHORZY C ON c.ID_PACJENTA = b.ID_PACJENTA
+ WHERE (WIEK BETWEEN in_wiek-10 AND in_wiek+10))
+ GROUP BY ID_CHOROBY
+ ORDER BY zliczenia DESC)
+WHERE ROWNUM = 1;
+SELECT NAZWA
+INTO v_nazwa_choroby
+FROM CHOROBY
+WHERE ID_CHOROBY = v_id_choroby;
+RETURN v_nazwa_choroby;
+EXCEPTION
+WHEN NO_DATA_FOUND THEN
+ dbms_output.put_line('Sprawdz ponowanie wprowadzony wiek');
+END;
+END znany_lekarz;
